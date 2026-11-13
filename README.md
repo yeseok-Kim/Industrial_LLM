@@ -8,96 +8,244 @@
 
 - Paper Link :
 
-# Code Description
 
-YOLO_ResNet_train : Training & Testing Vision Model (YOLO-ResNet) 
+---
 
-LLM_final : Integration and Test File for Vision Model and LLM
+# 📌 후속 연구 : RAG/LLM 재검증 및 재설계
 
-# Download Fine-tuned Models
+> 논문 제출 이후
+
+> 검색·생성·평가 각 단계의 문제를 측정으로 확인하고 재설계하였다.
+> 실행 파일 : `RAG_v2_재검증.ipynb`
+
+## 한눈에 보기
+
+| 항목 | 원본 (논문 코드) | 재설계 |
+|---|---|---|
+| 검색 방식 | "부품 상태" 문장 벡터 검색, 상위 3개 | SQLite 조건 일치 검색 (5개 조건) + 과거 조치 비율 |
+| 검색 정답률 (정답 조치가 1순위) | 평균 73.5% (실행마다 70.5~86.2%) | **99.6%** (항상 같은 결과) |
+| 오류체결 리포트 중 정답 부품만 정확히 지시한 비율 | **0.1%** | **96.5%** |
+| 평가 방식 | LLM 없이 만든 템플릿 문장을 임베딩 유사도로 채점 | 실제 LLM 리포트를 정답 조치와 대조해 채점 + 사람 검수 |
+
+## 1. 원본에서 확인한 문제
+
+**① 검색 : 조치가 다른 기록을 구분하지 못함**
+- 벡터 DB에는 "KCPC형 오류체결 상태" 같은 부품·상태 문장만 저장되고, 조치 내용은 메타데이터로만 붙어 있었다.
+- 그래서 조치가 서로 다른 기록도 문장이 같으면 벡터가 똑같아진다. 예를 들어 KCPC형 오류체결에는 바꿔 끼울 부품이 다른 조치가 7가지 있는데, 이 7개가 모두 같은 벡터가 된다.
+- 결국 상위 3개는 사실상 무작위로 뽑히고, 실행할 때마다 결과가 바뀐다 (12회 측정, 70.5~86.2%). 오류체결의 검색 정답률은 22.4%였다.
+
+**② 생성 : 후보를 그대로 나열하거나 틀린 부품을 추천함**
+- LLM은 검색된 후보 3개를 모두 나열하거나, 틀린 부품을 1순위로 추천하였다. 변경 방향을 거꾸로 쓴 경우(GPC→GPL을 GPL→GPC로)도 있었다.
+- 근거 없는 이유("업그레이드", "호환성 향상")와 일반론("작업자 교육", "자동화 도입")을 덧붙였다.
+
+**③ 평가 : 실제 LLM 리포트를 평가하지 않음**
+- 논문의 충실도 0.875는 일괄 평가 코드에서 계산되었는데, 이 코드는 EEVE를 호출하지 않는다. 대신 `"{질의} 불량이 발생한 경우, RAG 가이드라인에 따라 다음 조치를 수행합니다: {검색 결과}"` 형태의 템플릿 문장을 만들고, 검색 결과와의 임베딩 유사도를 계산하였다.
+- 템플릿 안에 검색 결과가 그대로 들어가므로 점수가 높게 나올 수밖에 없다. 또 결함 상태가 "미체결"로 고정되어 있고, 정상 부품도 평가에 포함되었다.
+- 임베딩 유사도로는 리포트가 틀린 부품을 지시했는지 판별할 수 없다 (아래 결과 3 참고).
+
+## 2. 개선 내용
+
+**검색 : SQL 조건 일치 검색**
+- 학습 데이터 543,101건을 SQLite에 적재하였다.
+- SQL로 조치 분포를 분석하여 검색 조건을 정하였다 (GROUP BY, COUNT(DISTINCT), CTE, CASE WHEN, JOIN).
+  - 부품·상태 2개 조건만으로는 조치가 하나로 정해지지 않았다.
+  - 적용 분야·유체·제품명·부품·상태 5개 조건이 모두 같으면 조치가 거의 하나로 정해졌다.
+- 검색 결과에는 "주 조치 / 대안 조치"와 과거 비율(%)을 함께 제공한다. 5개 조건이 모두 같은 기록이 없으면 2개 조건으로 대체 검색한다.
+
+**생성 : 작성 규칙 추가**
+1. 첫 문장에 검색된 조치를 부품명까지 그대로 제시
+2. 대안 조치가 있으면 과거 비율과 함께 덧붙임
+3. 원인은 조치 내용으로 확인되는 범위에서 한 문장으로만 설명
+4. 검색 결과에 없는 조치(작업자 교육, 장비 도입 등)는 쓰지 않음
+5. 전체 3문장 이내
+
+**평가 : 정답 조치 기준 채점**
+- 테스트 데이터에 기록된 실제 조치(Action)를 정답으로 사용하였다.
+- 테스트 결함 52,241건 전체를 조건마다 평가하였다 (조건 4개, 총 104,482건 리포트 채점).
+- 결과가 매번 같게 나오도록 샘플링 없이 생성하였다(greedy). 같은 프롬프트는 한 번만 생성하고 재사용하였다.
+- 오류체결 리포트는 정규식으로 "○○형으로 변경"의 교체 부품을 추출하여 채점하였다.
+  - 정확지시 : 정답 교체 부품을 언급함
+  - 오지시 : 정답이 아닌 교체 부품을 언급함
+  - 엄격정확 : 정답 부품만 언급하고 틀린 부품은 언급하지 않음
+- 자동 채점이 맞는지 확인하기 위해 최종 조건 리포트 일부를 사람이 직접 검수하였다.
+
+## 3. 결과
+
+**결과 1. 검색 정답률 (테스트 결함 52,241건)**
+
+| 검색 방식 | 전체 | 오류체결 |
+|---|---|---|
+| 원본 (문장 벡터, 10회 평균) | 73.5% | 22.4% |
+| 재설계 (SQL 5개 조건) | 99.6% | 100% |
+
+**결과 2. 리포트 정확도 : 검색 × 프롬프트 (오류체결 기준)**
+
+| 조건 | 검색 | 프롬프트 | 정확지시 | 오지시 | 엄격정확 |
+|---|---|---|---|---|---|
+| 원본 | 원본 | 원본 | 39.0% | 52.1% | 0.1% |
+| 프롬프트만 개선 | 원본 | 개선 | 65.2% | 96.3% | 3.7% |
+| 검색만 개선 | 재설계 | 원본 | 23.2% | 0.0% | 23.2% |
+| **검색+프롬프트 개선** | 재설계 | 개선 | **96.5%** | 3.5% | **96.5%** |
+
+- 검색만 고치면 틀린 지시는 사라지지만, LLM이 근거를 쓰지 않고 일반론을 작성하여 정확도가 23.2%에 그친다.
+- 프롬프트만 고치면 LLM이 근거를 충실히 옮기지만, 근거 자체에 틀린 후보가 섞여 있어 틀린 지시가 96.3%로 오히려 늘어난다.
+- **검색과 생성을 함께 고쳤을 때만** 정확도가 96.5%가 되었다.
+
+**결과 3. 임베딩 유사도 지표의 한계**
+
+| 조건 | 오지시 | 정답 유사도 | 충실도 (근사) | 관련성 (근사) |
+|---|---|---|---|---|
+| 원본 | 52.1% | 0.695 | 0.722 | 0.516 |
+| 프롬프트만 개선 | **96.3%** | **0.775** | **0.801** | **0.540** |
+| 검색만 개선 | 0.0% | 0.664 | 0.640 | 0.467 |
+| 검색+프롬프트 개선 | 3.5% | 0.725 | 0.809 | 0.526 |
+
+- 틀린 지시가 가장 많은 조건(96.3%)이 유사도 점수는 가장 높았다.
+- 임베딩 유사도는 문장이 비슷한지만 보고, 부품명이 맞는지는 구분하지 못한다. 그래서 부품명을 직접 대조하는 채점을 따로 설계하였다.
+
+**결과 4. 사람 검수**
+- 최종 조건의 오류체결 리포트 중 무작위 20건을 직접 검수하였다. 정답 라벨이 잘못 기록된 1건("문제 에어피팅으로 변경")은 제외하였다.
+- 19건 모두 정답 조치를 지시하였고, 자동 채점 결과와 19건 모두 일치하였다.
+
+## 4. 한계
+
+- **비전 모델 오류는 반영하지 않음** : 검색 성능만 따로 보기 위해, 비전 모델 예측 대신 정답 라벨(부품·상태·제품 정보)을 입력으로 사용하였다. 실제 운영에서는 제품 정보가 함께 주어진다고 가정한다.
+- **부품명 오기** : 최종 조건에서도 부품명을 잘못 옮겨 쓴 경우가 있었다 (KSPL45형 → KSPC45형).
+- **과거 비율 오해석** : 검색 결과의 "과거 100%"(과거 같은 상황에서 이 조치를 한 비율)를 리포트가 "성공률 100%"로 표현하였다.
+- **근거에 없는 내용** : 일부 리포트는 금지 규칙에도 불구하고 근거에 없는 조치나 수치를 덧붙였다.
+- **라벨 오류** : 테스트 데이터 일부에 부품명이 빠진 정답 라벨이 있다.
+- **프롬프트 조정** : 작성 규칙은 실패 유형을 보고 한 번 수정한 것으로, 별도 검증 데이터 없이 테스트 결과를 보고 만들었다.
+
+---
+
+# 원본 프로젝트 (논문 제출 시점 코드 기준)
+
+> 아래는 논문 제출 시점의 코드(`LLM_final.ipynb`, `YOLO_ResNet_train.ipynb`)를 기준으로 작성하였다.
+
+## 코드 구성
+
+- `YOLO_ResNet_train` : 비전 모델(YOLO, ResNet) 학습 및 테스트
+- `LLM_final` : 비전 모델과 RAG/LLM 통합 및 테스트
+
+## 학습된 모델 다운로드
 
 https://drive.google.com/drive/folders/12jxk1qCEuXGFxVvPF5-fMPewubyg870D?usp=drive_link
 
-YOLO : yolo_train_results_v12
+- YOLO : yolo_train_results_v12
+- ResNet : best_classification_resnet_finetuned.pth
 
-ResNet : best_classification_resnet_finetuned.pth
-
-# Dataset
+## 데이터셋
 
 <img width="1917" height="1078" alt="image" src="https://github.com/user-attachments/assets/4f5c94d2-0256-4977-ae0b-3219ceabaf52" />
 
-This project utilizes a high-resolution image dataset designed to diagnose the condition of assembly modules equipped with air fittings (pneumatic tube connectors) in industrial manufacturing environments. The original dataset is based on the "Air Fitting Assembly Status Data" provided by AI Hub (National Information Society Agency).
+산업 제조 환경에서 에어피팅(공압 튜브 커넥터)이 체결된 조립 모듈의 상태를 진단하는 고해상도 이미지 데이터셋이다. AI Hub(한국지능정보사회진흥원)의 "에어 피팅 조립 상태 데이터"를 사용하였다.
 
-* Dataset Link : https://www.aihub.or.kr/aihubdata/data/view.do?currMenu=115&topMenu=100&dataSetSn=71927
+- 구성 : 학습 139,413 / 검증 34,854 / 테스트 21,799 세트 (이미지 JPG + 라벨 JSON)
+- 데이터 링크 : https://www.aihub.or.kr/aihubdata/data/view.do?currMenu=115&topMenu=100&dataSetSn=71927
 
-# Proposed Framework
+## 전체 구조
 
 <img width="1917" height="1078" alt="image" src="https://github.com/user-attachments/assets/e2d31947-a8bf-4de6-879b-047112cb2e18" />
 
-1. Perception (Edge Vision AI): A lightweight vision model (YOLO + ResNet) detects the Region of Interest (ROI) and classifies the assembly status (e.g., normal, loose, missing) in real-time.
+1. **인지 (비전 AI)** : YOLO가 에어피팅 부품 영역을 찾고, ResNet이 체결 상태를 완전체결·부분체결·미체결·오류체결 4가지로 분류한다.
+2. **변환** : 탐지 결과(부품명, 상태)를 텍스트로 정리한다.
+3. **검색 (RAG)** : 시스템이 불량 부품의 "부품 상태" 문장으로 벡터 DB(ChromaDB)를 검색하여 과거 조치 3개를 가져온다. 동시에 사고 로그 DB에서 같은 불량의 반복 여부를 확인한다.
+4. **리포트 생성** : 검색된 조치와 반복 정보를 프롬프트로 묶어 LLM에 전달하고, LLM이 원인과 조치를 담은 진단 리포트를 작성한다.
 
-2. Context Conversion: The visual detection metadata is translated into a structured natural language prompt.
+LLM에는 이미지가 아닌 텍스트만 전달된다 (인지와 추론 분리).
 
-3. Reasoning (RAG + LLM): The Large Language Model retrieves relevant past maintenance logs from a Vector DB (ChromaDB) via semantic search to analyze the root cause.
-
-4. Report Generation: The system finally generates an explainable and actionable diagnostic report, providing field workers with clear maintenance guidelines.
-
-# Vision Model Architecture
+## 비전 모델 구조
 
 <img width="1917" height="1078" alt="image" src="https://github.com/user-attachments/assets/54553230-0157-4801-80b6-72e52cf3a594" />
 
-Our architecture utilizes lightweight vision expert models for real-time
+- **YOLOv12 (부품 탐지)** : 이미지에서 에어피팅 부품을 탐지한다. 결함 단서가 되는 결합부가 잘리지 않도록 상하좌우 20% 여유를 두고 영역을 잘라낸다.
+- **전처리** : 잘라낸 영역의 비율이 찌그러지지 않도록 정사각형 패딩(SquarePad)을 적용한 뒤 224×224로 변환한다.
+- **ResNet-18 (상태 분류)** : 잘라낸 영역을 완전체결·부분체결·미체결·오류체결 4가지로 분류한다.
+- **Grad-CAM** : ResNet이 판단 근거로 삼은 영역을 강조하여 작업자에게 시각적으로 보여준다. LLM에는 전달되지 않는다.
 
-- YOLOv12 (Part Detection): Rapidly and robustly detects air fitting components within complex backgrounds. To prevent the loss of fine defect features, it extracts the Region of Interest (ROI) with a 20% margin.
+**학습 설정 (코드 기준)**
 
-- ResNet-18 (Status Classification & XAI): Processes the extracted ROI to classify the assembly status into four categories: Normal, Partial, Missing, and Error. Furthermore, it integrates the Grad-CAM mechanism to highlight the decisive defect areas, providing explainable visual evidence that helps the LLM accurately understand the anomaly.
+| 모델 | 항목 | 설정값 |
+|---|---|---|
+| YOLO | 에포크 | 30 + 추가 70 |
+| YOLO | 배치 크기 | 128 |
+| ResNet | 에포크 | 최대 50 (조기 종료 patience 5) |
+| ResNet | 학습률 | 0.0001 (Adam) |
+| ResNet | 배치 크기 | 128 |
 
-# RAG-based Report Generation
+※ YOLO 추가 학습 셀은 `YOLO()`로 가중치 없이 모델을 불러오므로, 코드 그대로는 이전 30에포크 가중치에서 이어서 학습되지 않는다.
+
+## RAG 기반 리포트 생성
 
 <img width="1917" height="1078" alt="image" src="https://github.com/user-attachments/assets/5870cc45-cd91-4948-89b7-0347da8182f6" />
 
-To address domain knowledge limitations and prevent LLM hallucinations, the system employs a Retrieval-Augmented Generation (RAG) framework.
+- 임베딩 모델 : jhgan/ko-sroberta-multitask
+- LLM : yanolja/EEVE-Korean-Instruct-10.8B-v1.0 (4비트 양자화, Colab GPU에서 로컬 실행)
+- **지식 DB (SQLite)** : 학습 데이터 JSON에서 부품·상태·조치 543,101건을 추출하여 저장한다.
+- **벡터 DB (ChromaDB)** : 중복을 제거한 고유 (부품, 상태, 조치) 조합 72개를 저장한다. 임베딩하는 문서는 "부품 상태" 문장(예: "KCPC형 오류체결 상태")이고, 조치는 메타데이터로 붙는다.
+- **검색** : 불량의 "부품 상태" 문장과 코사인 유사도가 높은 상위 3개 문서의 조치를 가져온다.
+- **사고 로그** : 탐지된 불량을 SQLite에 기록하고, GROUP BY·HAVING으로 같은 부품·상태가 2회 이상 반복되었는지 확인한다.
+- **리포트** : 검색된 조치와 반복 정보를 프롬프트에 넣어 EEVE가 원인 분석과 조치 제안을 3~4문장으로 작성한다.
 
-* Embedding Model : jhgan/ko-sroberta-multitask
-
-* LLM : yanolja/EEVE-Korean-Instruct-10.8B-v1.0
-
-* Vector Database (ChromaDB): Historical maintenance logs and manuals are embedded into high-dimensional vectors and stored in ChromaDB for semantic search.
-  
-* Context Retrieval: Upon detecting an anomaly, the system calculates the cosine similarity to instantly retrieve the top 3 most contextually relevant maintenance records.
-  
-* Reporting: The LLM synthesizes the visual detection metadata (from YOLO-ResNet) with the retrieved knowledge to generate a highly reliable diagnostic report. This report provides field workers with the root cause and specific, actionable maintenance guidelines.
-
-## Real-Time Reliability Evaluation (RAGAS)
+## 리포트 신뢰도 점수 (임베딩 유사도 근사)
 
 <img width="1917" height="1078" alt="image" src="https://github.com/user-attachments/assets/76be6695-4407-4ac5-9a7e-9567ed04910b" />
 
-To ensure the trustworthiness of the AI-generated guidelines, the system integrates the RAGAS (Retrieval Augmented Generation Assessment) framework for concurrent evaluation.
+RAGAS 지표 이름(충실도, 답변 관련성)을 사용하지만, RAGAS 라이브러리는 사용하지 않는다. 임베딩 코사인 유사도로 간단히 근사하였다.
 
-*   Faithfulness: Verifies that the LLM's output is strictly derived from the retrieved historical logs, effectively preventing hallucination.
+- 충실도 (근사) : 검색 결과와 리포트의 임베딩 유사도
+- 답변 관련성 (근사) : 질의("부품 상태")와 리포트의 임베딩 유사도
+- 데모 실행 시 리포트가 생성될 때마다 두 점수를 계산하여 리포트 화면에 함께 표시한다.
 
-*   Answer Relevancy: Quantifies how directly and intuitively the generated diagnostic report addresses the identified anomaly.
+※ 실제 RAGAS는 리포트를 문장 단위 주장으로 나누어 하나씩 근거와 대조하지만, 이 구현은 문장 전체의 유사도만 계산한다.
 
-*   Automated Background Scoring: The pipeline calculates these metrics in real-time as the report is generated, displaying quantitative confidence scores to the field workers to ensure operational reliability.
-
-# Vision Classification Test Result
+## 비전 모델 테스트 결과
 
 <img width="1917" height="1078" alt="image" src="https://github.com/user-attachments/assets/b1bcf88f-bdb6-4b61-84b2-53bacb352c0a" />
 
-# Diagnosis Report
+**전처리 방식별 정확도**
+
+| 전처리 | 정확도 |
+|---|---|
+| 제안 방식 (20% 여유 + SquarePad) | 92.2% |
+| 20% 여유 | 84.2% |
+| 여유 없음 | 64.8% |
+| 원본 전체 이미지 | 29.7% |
+
+※ 제안 전처리로 학습한 단일 ResNet 모델에 입력 방식만 바꿔 비교한 결과이다.
+
+**모델별 성능**
+
+| 모델 | 구분 | 정확도 | 정밀도 | 재현율 |
+|---|---|---|---|---|
+| YOLO (부품 탐지) | 전체 | 92% | 93% | 92% |
+| ResNet (상태 분류) | 정상 | 92% | 93% | 94% |
+| | 부분체결 | | 98% | 97% |
+| | 미체결 | | 99% | 90% |
+| | 오류체결 | | 94% | 95% |
+
+※ 이미지 단위로 정답·예측 라벨 목록을 비교하여 채점하였다 (부품의 위치 일치 여부는 반영하지 않음).
+
+**참고 : ResNet 단독 성능 (정답 박스 기준, 테스트 68,144개)**
+
+정답 바운딩 박스로 잘라낸 영역만 분류했을 때의 결과이다 (YOLO 탐지 오류 제외).
+
+| 상태 | 정밀도 | 재현율 |
+|---|---|---|
+| 정상 | 96% | 97% |
+| 부분체결 | 100% | 99% |
+| 미체결 | 100% | 100% |
+| 오류체결 | 96% | 97% |
+
+## 진단 리포트 예시
 
 <img width="1917" height="1078" alt="image" src="https://github.com/user-attachments/assets/4eb5ed82-5f26-4ce4-a034-919eaaa9d435" />
 
-# References
+## 참고 문헌
 
-- Embedding model : https://huggingface.co/jhgan/ko-sroberta-multitask
-
-- LLM : https://huggingface.co/yanolja/YanoljaNEXT-EEVE-Instruct-10.8B
-
-- YOLO : Terven, J., and Córdova-Esparza, D., “A Comprehensive Review of YOLO Architectures in Computer Vision: From YOLOv1 to YOLOv8 and YOLO-NAS”, arXiv:2304.00501, 2023. (https://arxiv.org/abs/2304.00501)
-
-- ResNet : Kaiming He, et al., “Deep residual learning for image recognition”,  IEEE conference on computer vision and pattern recognition, USA, 2016. (https://arxiv.org/abs/1512.03385)
-
-- RAG : Patrick Lewis, et al., “Retrieval-Augmented Generation for Knowledge-Intensive NLP Tasks”, NeurIPS 2020, Canada, 2020. (https://arxiv.org/abs/2005.11401)
-
-- RAGAS : Shahul Es, et al., “Ragas: Automated Evaluation of Retrieval Augmented Generation”, EACL 2024, Malta, 2024. (https://arxiv.org/abs/2309.15217)
+- 임베딩 모델 : https://huggingface.co/jhgan/ko-sroberta-multitask
+- LLM : https://huggingface.co/yanolja/EEVE-Korean-Instruct-10.8B-v1.0
+- YOLO : Terven, J., and Córdova-Esparza, D., "A Comprehensive Review of YOLO Architectures in Computer Vision: From YOLOv1 to YOLOv8 and YOLO-NAS", arXiv:2304.00501, 2023. (https://arxiv.org/abs/2304.00501)
+- ResNet : Kaiming He, et al., "Deep residual learning for image recognition", IEEE conference on computer vision and pattern recognition, USA, 2016. (https://arxiv.org/abs/1512.03385)
+- RAG : Patrick Lewis, et al., "Retrieval-Augmented Generation for Knowledge-Intensive NLP Tasks", NeurIPS 2020, Canada, 2020. (https://arxiv.org/abs/2005.11401)
+- RAGAS : Shahul Es, et al., "Ragas: Automated Evaluation of Retrieval Augmented Generation", EACL 2024, Malta, 2024. (https://arxiv.org/abs/2309.15217)

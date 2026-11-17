@@ -11,6 +11,24 @@
 
 ---
 
+# Gradio 시연 (Colab GPU, EEVE)
+
+<p align="center">
+  <img src="https://github.com/user-attachments/assets/a1a1c6ea-fa0c-4cce-bc0c-583a90a00819" width="800" alt="시연 화면 1">
+</p>
+
+<p align="center">
+  <img src="https://github.com/user-attachments/assets/bb282655-5bc1-4c31-be3e-d923b85957fb" width="800" alt="시연 화면 2">
+</p>
+
+- 진단마다 실행된 SQL 쿼리 표시 (불량 조치 이력 검색, 사고 로그 기록·누적 조회)
+
+<p align="center">
+  <img src="https://github.com/user-attachments/assets/3a14f77c-5c89-4cdf-802d-b32ac90bd26d" width="800" alt="실행된 SQL 화면">
+</p>
+
+---
+
 # 📌 후속 연구 : RAG/LLM 재검증 및 재설계
 
 > 논문 제출 이후

@@ -13,6 +13,10 @@
 
 # Gradio 시연 (Colab GPU, EEVE)
 
+### 테스트 이미지를 고르면, 생산 라인 정보를 자동 출력 →
+▶ 진단 실행을 누르면, YOLO 부품 탐지 → ResNet 체결 상태 분류 → 사고 로그 기록·반복 확인 → 과거 조치 이력 검색(SQL) → EEVE 진단 리포트 생성
+
+
 <p align="center">
   <img src="https://github.com/user-attachments/assets/a1a1c6ea-fa0c-4cce-bc0c-583a90a00819" width="800" alt="시연 화면 1">
 </p>
